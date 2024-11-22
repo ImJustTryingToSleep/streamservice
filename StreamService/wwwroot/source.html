@@ -1,0 +1,79 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Video Stream Sender</title>
+</head>
+<body>
+
+<video id="video-stream-source" controls autoplay></video>
+<script src="https://cdn.jsdelivr.net/npm/base64-js@1.5.1/base64js.min.js"></script>
+<script src="signalr.js"></script>
+<script>
+    //webm9MimeCodec: определяет MIME-тип, который будет использоваться для кодирования видео.
+    const webm9MimeCodec = 'video/webm;codecs="vp9"';
+    
+    //segmentLimit: задает максимальный размер сегмента видео для отправки (в байтах).
+    const segmentLimit = 20000;
+    
+    const videoSource = document.getElementById('video-stream-source');
+
+    const connection = new signalR.HubConnectionBuilder()
+        .withUrl("https://localhost:7143/hubs/stream")
+        .build();
+
+    let mediaRecorder = null;
+
+    connection.start().then(() => {
+        console.log("Connection started");
+
+        //handleDataAvailable получает данные, преобразует их в ArrayBuffer и затем в массив байтов, 
+        // который далее кодируется в Base64.
+        async function handleDataAvailable(event) {
+            const ab = await event.data.arrayBuffer();
+            const bytes = new Uint8Array(ab);
+            const ab64 = base64js.fromByteArray(bytes);
+            
+            //Если длина закодированного фрагмента меньше либо равна заданному лимиту, он отправляется в одном сегменте. 
+            // Если превышает лимит, данные разбиваются на несколько сегментов, которые отправляются по отдельности.
+            if (ab64.length <= segmentLimit) {
+                sendSegment({ index: 0, part: ab64 });
+            } else {
+                for (let i = 0, ii = 0; i < ab64.length; i += segmentLimit, ii++) {
+                    sendSegment({ index: ii, part: ab64.substr(i, segmentLimit) });
+                }
+            }
+        }
+        
+        //Эта функция принимает данные и отправляет их на сервер через метод SendVideoData. 
+        // В случае ошибки вызывается обработчик для вывода ошибки в консоли.
+        const sendSegment = (data) => {
+            connection.invoke("SendVideoData", data).catch(err => console.error(err));
+        }
+        
+        ///Получение потокового видео с экрана:
+        //Используется метод getDisplayMedia, который позволяет пользователю выбрать часть экрана для записи 
+        // (в данном случае только видео, без аудио).
+        navigator.mediaDevices.getDisplayMedia({ video: true, audio: false })
+            .then(function (stream) {
+                //stream начинает воспроизводиться в элементе видео, 
+                // и создается экземпляр MediaRecorder для записи этого потока в заданном формате.
+                videoSource.srcObject = stream;
+                videoSource.play();
+                mediaRecorder = new MediaRecorder(stream, { mimeType: webm9MimeCodec });
+                
+                //При каждом доступном событии данные (в потоковом режиме) обрабатываются с помощью handleDataAvailable
+                mediaRecorder.ondataavailable = handleDataAvailable;
+                mediaRecorder.start();
+                
+                //С помощью setInterval каждую 10 миллисекунд вызывается requestData, 
+                // чтобы принудительно запросить запись текущих данных, как только они станут доступны.
+                setInterval(() => mediaRecorder.requestData(), 10);
+            })
+            .catch(err => console.error("Error accessing media devices.", err));
+    })
+        .catch(err => console.error("Error starting connection: ", err));
+
+</script>
+</body>
+</html>
