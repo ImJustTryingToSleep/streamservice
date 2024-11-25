@@ -2,111 +2,120 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Title</title>
+    <title>Video Stream Watcher</title>
 </head>
 <body>
 
 <video id="video-stream-target" controls autoplay></video>
-<button onclick="start()">watch</button>
+<button id="watch-button">Watch</button>
 
 <script src="https://cdn.jsdelivr.net/npm/base64-js@1.5.1/base64js.min.js"></script>
 <script src="signalr.js"></script>
 <script>
-    const webm9MimeCodec = 'video/webm;codecs="vp9"'
-
-    const videoTarget = document.getElementById('video-stream-target')
+    let peerConnection;
+    const config = {
+        iceServers: [
+            {url:'stun:stun4.l.google.com:19302'}
+            // { 
+            //   "urls": "turn:TURN_IP?transport=tcp",
+            //   "username": "TURN_USERNAME",
+            //   "credential": "TURN_CREDENTIALS"
+            // }
+        ],
+        offerToReceiveVideo: true
+    };
 
     const connection = new signalR.HubConnectionBuilder()
-        .withUrl("https://localhost:7143/hubs/stream")
+        .withUrl("https://localhost:7143/hubs/broadcaster") // URL вашего хаба
         .build();
 
-    connection.start()
+    const video = document.querySelector("#video-stream-target");
+   //const video = document.querySelector("video");
+    const watchButton = document.querySelector("#watch-button");
 
-    //Создается фабрика канала для хранения данных в виде буфера.
-    const channelFactory = function () {
-        const _arrayBufferBuffer = []
-        const pullResolveQueue = []
+    video.addEventListener('loadedmetadata', () => {
+        console.log("Video metadata loaded. Duration:", video.duration);
+    });
 
-        return {
-            //push: добавляет данные (ArrayBuffer) в очередь. Если есть запрос на получение данных, он сразу же обслуживается.
-            push: (ab) => {
-                if (pullResolveQueue.length > 0) {
-                    const pull = pullResolveQueue.pop()
-                    pull(ab)
-                } else {
-                    _arrayBufferBuffer.push(ab)
-                }
-            },
-            //pull: возвращает данные из очереди или ожидает, пока данные не станут доступны.
-            pull: () => new Promise((res, rej) => {
-                if (_arrayBufferBuffer.length > 0) {
-                    res(_arrayBufferBuffer.pop())
-                }
-                pullResolveQueue.push(res)
-            })
-        }
-    }
+    video.addEventListener('playing', () => {
+        console.log("Video is playing");
+    });
 
-    const channel = channelFactory()
-    //Создается экземпляр MediaSource, который будет использоваться для создания потокового видео.
-    const mediaSource = new MediaSource();
+    video.addEventListener('pause', () => {
+        console.log("Video is paused");
+    });
 
-    //При открытии источника MediaSource создается SourceBuffer, который будет добавлять потоки данных.
-    mediaSource.addEventListener('sourceopen', async () => {
-        const sourceBuffer = mediaSource.addSourceBuffer(webm9MimeCodec);
-        //sourceBuffer.mode = 'sequence': устанавливает режим работы буфера.
-        sourceBuffer.mode = 'sequence';
-        
-        //Обработка событий обновления sourceBuffer
-        //Этот обработчик срабатывает, когда SourceBuffer заканчивает добавление данных. Если видео приостановлено, оно автоматически воспроизводится
-        sourceBuffer.addEventListener('updateend', async () => {
-            if (videoTarget.paused)
-                videoTarget.play();
-            
-            //Затем выполняется попытка извлечь данные из канала и добавить их в SourceBuffer.
-            const ab = await channel.pull()
-            sourceBuffer.appendBuffer(ab)
-        });
-        
-        //При первом открытии MediaSource извлекается и добавляется первый фрагмент данных из канала.
-        const ab = await channel.pull()
-        sourceBuffer.appendBuffer(ab)
+    video.addEventListener('error', (e) => {
+        console.error("Video error occurred:", e);
     });
     
-    //Создается URL для потока MediaSource, который устанавливается в src видеоэлемента для воспроизведения.
-    videoTarget.src = URL.createObjectURL(mediaSource);
+    watchButton.addEventListener('click', () => {
+        connection.start()
+            .then(() => {
+                console.log('Connection started');
+                return connection.invoke("RegisterWatcher"); // Уведомляем сервер, что зритель подключился
+            })
+            .catch(err => console.error('Error while starting connection: ', err));
+    });
+
+    video.addEventListener('loadedmetadata', () => {
+        console.log("Video metadata loaded.");
+    });
     
-    //Эта функция подписывается на события, приходящие через SignalR от сервера, каждое из которых содержит новые данные видео.
-    const start = async () => {
-        var lastIndex = -1
-        var partBuffer = []
-        var playing = false;
+    connection.on("offer", (id, description) => {
+        console.log("Received offer: ", id, description); // Лог предложения
+        peerConnection = new RTCPeerConnection(config);
+        peerConnection
+            .setRemoteDescription(description)
+            .then(() => peerConnection.createAnswer())
+            .then(sdp => peerConnection.setLocalDescription(sdp))
+            .then(() => {
+                const localDescription = JSON.stringify(peerConnection.localDescription);
+                console.log("Sending Answer: ", id, peerConnection.localDescription)
+                return connection.invoke("SendAnswer", id, localDescription);
+            });
         
-        connection.on('video-data', async (r) => {
-            if (r.part.length === 0) {
-                return
+        peerConnection.ontrack = event => {
+            if (event.streams && event.streams[0]) {
+                video.srcObject = event.streams[0];
+                video.play().catch(e => console.error("Video play error:", e));
+            } else {
+                console.error("Received track but no stream available.");
             }
-
-            //Состояние playing предотвращает добавление новых данных, если текущий индекс не равен 0 (значит, еще не начался поток).
-            if (!playing && r.index !== 0) {
-                return
-            }
-            playing = true
+        };
             
-            //Когда данные приходят, они обрабатываются: если индекс не обновляется, то данные собираются в буфер, который затем отправляется в канал.
-            if (lastIndex >= r.index) {
-                const ba = base64js.toByteArray(partBuffer.reduce((a, b) => a + b))
-                channel.push(ba.buffer)
-                partBuffer = []
+        peerConnection.onicecandidate = function(e) {
+            if (e.candidate) {
+                const candidate = JSON.stringify(e.candidate);
+                return connection.invoke("SendCandidate", id, candidate);
             }
+        };
+    });
 
-            partBuffer.push(r.part)
+    connection.on("broadcaster", () => {
+        console.log("A broadcaster has connected.");
+        return connection.invoke("RegisterWatcher"); // Уведомляем следующее подключение
+    });
 
-            lastIndex = r.index
-        })
-    }
+    connection.on("candidate", (id, candidate) => {
+        console.log("Received candidate: ", id, candidate);
+        peerConnection
+            .addIceCandidate(new RTCIceCandidate(candidate))
+            .catch(e => console.error(e));
+    });
 
+    connection.on("connect", () => {
+        connection.invoke("RegisterWatcher");
+    });
 
+    connection.on("broadcaster", () => {
+        connection.invoke("RegisterWatcher");
+    });
+
+    window.onunload = window.onbeforeunload = () => {
+        connection.close();
+        peerConnection.close();
+    };
 </script>
 </body>
 </html>

@@ -26,7 +26,7 @@ if (app.Environment.IsDevelopment())
 
 app.UseCors("AllowSpecificOrigin");
 
-app.MapHub<SignalingHub>("/hubs/stream");
+app.MapHub<SignalingHub>("/hubs/broadcaster");
 
 app.UseHttpsRedirection();
 

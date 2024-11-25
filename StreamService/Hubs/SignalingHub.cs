@@ -1,46 +1,82 @@
 ﻿using Microsoft.AspNetCore.SignalR;
+using Newtonsoft.Json;
 using StreamService.Models;
 
 namespace StreamService.Hubs;
 
 public class SignalingHub : Hub
 {
-    private readonly IWebHostEnvironment _env;
-    public SignalingHub(IWebHostEnvironment env)
-    {
-        _env = env;
-    }
+    private static string _broadcaster;
 
-    //private static readonly List<VideoData> _videoDataList = new List<VideoData>();
-    
-    // Метод для получения данных видео из клиента
-    public async Task SendVideoData(VideoData videoData)
+    public async Task RegisterBroadcaster()
     {
-        // Сохранение видеоданных в списке
-        //_videoDataList.Add(videoData);
+        _broadcaster = Context.ConnectionId;
+        Console.WriteLine($"SignalingHub.RegisterBroadcaster called {_broadcaster}");
         
-        // Отправляем данные в группу
-        await Clients.Group("videoGroup").SendAsync("video-data", videoData);
+        await Clients.Others.SendAsync("broadcaster");
     }
 
-    // public async Task SendExistingVideoDataToNewClient()
-    // {
-    //     foreach (var videoData in _videoDataList)
-    //     {
-    //         await Clients.Caller.SendAsync("video-data", videoData); // Отправляем старые данные
-    //     }
-    // }
-
-    public override async Task OnConnectedAsync()
+    public async Task? RegisterWatcher()
     {
-        await Groups.AddToGroupAsync(Context.ConnectionId, "videoGroup"); // Добавляем нового клиента в группу
-        //await SendExistingVideoDataToNewClient();
-        await base.OnConnectedAsync();
+        if (_broadcaster == null)
+        {
+            throw new InvalidOperationException("No broadcaster is currently available.");
+        }
+        
+        Console.WriteLine($"SignalingHub.RegisterWatcher called {Context.ConnectionId}");
+        await Clients.Client(_broadcaster).SendAsync("watcher", Context.ConnectionId);
     }
 
-    public override async Task OnDisconnectedAsync(Exception? exception)
+    public async Task SendOffer(string id, string message)
     {
-        await Groups.RemoveFromGroupAsync(Context.ConnectionId, "videoGroup"); // Удаляем клиента из группы, если он отключается
+        //Console.WriteLine($"SendOffer called with ID: {id}, message: {message}");
+        
+        if (string.IsNullOrEmpty(id))
+        {
+            throw new ArgumentException("Connection ID cannot be null or empty", nameof(id));
+        }
+        
+        var description = JsonConvert.DeserializeObject<RTCSessionDescription>(message);
+        await Clients.Client(id).SendAsync("offer", Context.ConnectionId, description);
+    }
+
+    public async Task SendAnswer(string id, string message)
+    {
+        Console.WriteLine($"SendAnswer called with ID: {id}, message: {message}");
+        var description = JsonConvert.DeserializeObject<RTCSessionDescription>(message);
+        await Clients.Client(id).SendAsync("answer", Context.ConnectionId, description);
+    }
+
+    public async Task SendCandidate(string id, string message)
+    {
+        //Console.WriteLine($"SendCandidate called with ID: {id}, message: {message}");
+        //Console.WriteLine($"No client found with ID: {id}");
+        
+        if (string.IsNullOrWhiteSpace(message))
+        {
+            throw new ArgumentException("Message cannot be null or empty.", nameof(message));
+        }
+        var candidate = JsonConvert.DeserializeObject<RTCIceCandidate>(message);
+        
+        await Clients.Client(id).SendAsync("candidate", Context.ConnectionId, candidate);
+    }
+
+    public override async Task OnDisconnectedAsync(Exception exception)
+    {
+        await Clients.Client(_broadcaster).SendAsync("disconnectPeer", Context.ConnectionId);
         await base.OnDisconnectedAsync(exception);
+    }
+    
+    public class RTCSessionDescription
+    {
+        public string Type { get; set; }
+        public string Sdp { get; set; }
+    }
+    
+    public class RTCIceCandidate
+    {
+        public string Candidate { get; set; }
+        public string SdpMid { get; set; }
+        public int SdpMLineIndex { get; set; }
     }
 }
