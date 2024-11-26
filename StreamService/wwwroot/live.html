@@ -26,28 +26,11 @@
     };
 
     const connection = new signalR.HubConnectionBuilder()
-        .withUrl("https://localhost:7143/hubs/broadcaster") // URL вашего хаба
+        .withUrl("https://localhost:7143/hubs/broadcaster")
         .build();
 
     const video = document.querySelector("#video-stream-target");
-   //const video = document.querySelector("video");
     const watchButton = document.querySelector("#watch-button");
-
-    video.addEventListener('loadedmetadata', () => {
-        console.log("Video metadata loaded. Duration:", video.duration);
-    });
-
-    video.addEventListener('playing', () => {
-        console.log("Video is playing");
-    });
-
-    video.addEventListener('pause', () => {
-        console.log("Video is paused");
-    });
-
-    video.addEventListener('error', (e) => {
-        console.error("Video error occurred:", e);
-    });
     
     watchButton.addEventListener('click', () => {
         connection.start()
@@ -57,24 +40,26 @@
             })
             .catch(err => console.error('Error while starting connection: ', err));
     });
-
-    video.addEventListener('loadedmetadata', () => {
-        console.log("Video metadata loaded.");
-    });
     
+    //Получение предложения от стримера
     connection.on("offer", (id, description) => {
-        console.log("Received offer: ", id, description); // Лог предложения
+        //Когда зритель получает предложение SDP от стримера:
+        console.log("Received offer: ", id, description);
+        //Он создает новый RTCPeerConnection.
         peerConnection = new RTCPeerConnection(config);
         peerConnection
+            //Задает удаленное описание с предложением вещателя
             .setRemoteDescription(description)
+            //Создает ответ SDP и устанавливает его как локальное описание
             .then(() => peerConnection.createAnswer())
             .then(sdp => peerConnection.setLocalDescription(sdp))
+            //Отправляет ответ SDP обратно вещателю с помощью «SendAnswer
             .then(() => {
                 const localDescription = JSON.stringify(peerConnection.localDescription);
                 console.log("Sending Answer: ", id, peerConnection.localDescription)
                 return connection.invoke("SendAnswer", id, localDescription);
             });
-        
+        //Назначаем полученный медиапоток элементу video
         peerConnection.ontrack = event => {
             if (event.streams && event.streams[0]) {
                 video.srcObject = event.streams[0];
@@ -83,7 +68,7 @@
                 console.error("Received track but no stream available.");
             }
         };
-            
+        //Отправляем всех собранных ICE кандидатов  вещателю с помощью «SendCandidate»
         peerConnection.onicecandidate = function(e) {
             if (e.candidate) {
                 const candidate = JSON.stringify(e.candidate);
@@ -91,12 +76,8 @@
             }
         };
     });
-
-    connection.on("broadcaster", () => {
-        console.log("A broadcaster has connected.");
-        return connection.invoke("RegisterWatcher"); // Уведомляем следующее подключение
-    });
-
+    
+    //ICE кандидаты  принимаются от вещателя и добавляются в RTCPeerConnection.
     connection.on("candidate", (id, candidate) => {
         console.log("Received candidate: ", id, candidate);
         peerConnection

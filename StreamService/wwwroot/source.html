@@ -10,7 +10,9 @@
 <script src="https://cdn.jsdelivr.net/npm/base64-js@1.5.1/base64js.min.js"></script>
 <script src="signalr.js"></script>
 <script>
+    // Хранит экземпляры RTCPeerConnection
     const peerConnections = {};
+    // Конфигурация для RTCPeerConnection. Указывает сервер Google STUN для обхода NAT.
     const config = {
         iceServers: [
             {url:'stun:stun4.l.google.com:19302'}
@@ -19,37 +21,46 @@
 
     // Создаем соединение с сервером SignalR
     const connection = new signalR.HubConnectionBuilder()
-        .withUrl("https://localhost:7143/hubs/broadcaster") // Указываем путь к Hub
+        .withUrl("https://localhost:7143/hubs/broadcaster")
         .configureLogging(signalR.LogLevel.Information)
         .build();
-
-    const videoElement = document.getElementById("video-stream-source"); // Получаем элемент видео
-
+    
+    // Получаем элемент видео
+    const videoElement = document.getElementById("video-stream-source"); 
+    
+    //Обработка ответа от зрителя
+    //Когда зритель отправляет ответ SDP, стример получает его.
     connection.on("answer", (id, description) => {
         console.log("Received answer: ", id, description);
         if (peerConnections[id]) {
+            //Устанавливаем удаленное описание на соответствующем RTCPeerConnection.
             peerConnections[id].setRemoteDescription(new RTCSessionDescription(description))
                 .then(() => console.log(`Remote description set for ID: ${id}`))
                 .catch(err => console.error(`Error setting remote description for ID: ${id}`, err));
         }
         else {
-            console.error(`No PeerConnection found for ID: ${id}`);
+            console.error(`No PeerConnection found for Id: ${id}`);
         }
     });
 
+    //Обработка нового зрителя
     connection.on("watcher", id => {
+        //Создаем новый RTCPeerConnection для этого зрителя.
         const peerConnection = new RTCPeerConnection(config);
         peerConnections[id] = peerConnection;
         console.log("Peer Connection", peerConnection)
         
         let stream = videoElement.srcObject;
+        
+        //Добавляем захваченные медиатреки в это соединение.
         if (stream) {
             stream.getTracks().forEach(track => peerConnection.addTrack(track, stream));
         } else {
             console.error("Video stream is not available.");
             return;
         }
-
+        
+        //Обрабатываем ICE кандидатов, отправляя их в хаб
         peerConnection.onicecandidate = event => {
             if (event.candidate) {
                 console.log("CandidateId == ", id, event.candidate)
@@ -57,12 +68,10 @@
                 return connection.invoke("SendCandidate", id, candidate);
             }
         };
-
+        
+        //Создаем предложение SDP и отправляем его зрителю
         peerConnection.createOffer()
             .then(offer => {
-                console.log("Original SDP:", offer.sdp);
-                const modifiedOffer = setPreferedCodec(offer.sdp, 'VP9'); // или другой кодек
-                console.log("Modified SDP:", modifiedOffer);
                 return peerConnection.setLocalDescription(new RTCSessionDescription({
                     type: offer.type,
                     sdp: offer.sdp
@@ -74,12 +83,12 @@
                     return;
                 }
                 console.log("Sending Offer with ID:", id);
-                // Теперь, когда локальное описание установлено, оно не будет null
-                //console.log("Local Description set:", peerConnection.localDescription);
+                
                 if (!id || !peerConnection.localDescription) {
                     console.error("Invalid parameters for SendOffer: ", { id, localDescription: peerConnection.localDescription });
                     return;
                 }
+                
                 const localDescruptionJson = JSON.stringify(peerConnection.localDescription);
                 connection.invoke("SendOffer", id, localDescruptionJson)
             })
@@ -88,11 +97,16 @@
             });
     });
 
+    //Обработка ICE кандидатов  от зрителя
     connection.on("candidate", (id, candidate) => {
+        // ICE кандидаты от зрителя принимаются и добавляются в соответствующий RTCPeerConnection.
         peerConnections[id].addIceCandidate(new RTCIceCandidate(candidate));
     });
 
+    //Обработка отключений зрителей
     connection.on("disconnectPeer", id => {
+        //Если зритель отключается, связанный RTCPeerConnection закрывается и удаляется из peerConnections.
+        console.log("Watcher disconnected:", id);
         peerConnections[id].close();
         delete peerConnections[id];
     });
@@ -102,15 +116,15 @@
     };
 
     // Получение потока с экрана
-
-    getDisplayMedia()
-        .then(stream => {
+    navigator.mediaDevices.getDisplayMedia({video: true})
+        .then(function (stream) {
             if (!stream) {
                 console.error("No stream available.");
                 return; // Если поток отсутствует, выходим
             }
+            
             videoElement.srcObject = stream; // Назначаем поток на элемент видео
-            console.log("Media stream assigned:", stream); // Логируем назначенный поток
+            console.log("Media stream assigned:", stream);
 
             const peerConnection = new RTCPeerConnection(config); // Инициализируем соединение
             stream.getTracks().forEach(track => {
@@ -120,30 +134,7 @@
             // Уведомляем о начале передачи потока
             connection.invoke("RegisterBroadcaster");
         })
-        .catch(handleError);
-
-    // Функция для получения потока с экрана
-    function getDisplayMedia() {
-        return navigator.mediaDevices.getDisplayMedia({ video: true }); // Запрашиваем поток с экрана
-    }
-
-    function setPreferedCodec(sdp, codec) {
-        sdp = sdp.replace(/a=rtpmap:\d+ H264\/90000\r\n/g, '');
-        sdp = sdp.replace(/a=fmtp:\d+ .*H264.*?\r\n/g, '');
-
-        // Можно добавить аналогичные строки для других кодеков...
-
-        // Если добавляется H264
-        const newH264Id = 120; // Новый уникальный идентификатор, который не используется
-        sdp += `a=rtpmap:${newH264Id} H264/90000\r\n`;
-        sdp += `a=fmtp:${newH264Id} profile-level-id=42001f;packetization-mode=1\r\n`;
-
-        return sdp;
-    }
-    
-    function handleError(error) {
-        console.error("Error: ", error);
-    }
+        .catch(err => console.error("Error: ", err));
 
     // Запуск соединения с сервером
     connection.start()
